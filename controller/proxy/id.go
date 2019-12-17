@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// StreamId represents a id in redis stream.
+// StreamId represents an id in redis stream.
 type StreamId struct {
 	BinlogPos
 
@@ -38,23 +38,32 @@ func ParseStreamId(s string) StreamId {
 	}
 }
 
-// Format returns formatted stream id.
-func (id StreamId) Format() string {
+// String impelements Stringer interface.
+func (id StreamId) String() string {
 	// Returns an invalid redis stream id.
 	if !id.Valid() {
 		return "0-0"
 	}
-	return fmt.Sprintf("%d-%d", id.BinlogPos.ToUint64(), id.Counter)
+	return fmt.Sprintf("%d-%d", id.BinlogPos.Uint64(), id.Counter)
+}
+
+// Format impelements fmt.Formatter interface.
+func (id StreamId) Format(f fmt.State, c rune) {
+	if c == 's' {
+		fmt.Fprint(f, id.String())
+		return
+	}
+	fmt.Fprintf(f, "<StreamId: %d:%d %s>", id.BinlogPos.FileNum, id.BinlogPos.FilePos, id.String())
 }
 
 // After returns true if id is larger than another.
 func (id StreamId) After(another StreamId) bool {
-	u := id.BinlogPos.ToUint64()
+	u := id.BinlogPos.Uint64()
 	if u == 0 {
 		return false
 	}
 
-	anotherU := another.BinlogPos.ToUint64()
+	anotherU := another.BinlogPos.Uint64()
 	if u > anotherU {
 		return true
 	}
@@ -62,9 +71,4 @@ func (id StreamId) After(another StreamId) bool {
 		return false
 	}
 	return id.Counter > another.Counter
-}
-
-// String impelements Striner interface.
-func (id StreamId) String() string {
-	return fmt.Sprintf("%d<%d:%d>-%d", id.BinlogPos.ToUint64(), id.BinlogPos.FileNum, id.BinlogPos.FilePos, id.Counter)
 }

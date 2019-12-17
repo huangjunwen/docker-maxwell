@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
+	//"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -21,13 +23,8 @@ func stop() {
 	stopOnce.Do(stopFunc)
 }
 
-var (
-	proxyOpts = proxy.Options{
-		Ctx: stopCtx,
-	}
-)
-
 func handleSigal() {
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
@@ -38,21 +35,41 @@ func handleSigal() {
 	}()
 }
 
-func main() {
+var (
+	proxyOpts = proxy.Options{}
+)
 
+func main() {
+	// Parse flags.
+	flag.StringVar(&proxyOpts.ListenPort, "listen_port", "6378", "Redis proxy listen port")
+	flag.StringVar(&proxyOpts.UpstreamPort, "upstream_port", "6379", "Upstream redis listen port")
+	flag.StringVar(&proxyOpts.KeyName, "key_name", "maxwell", "Key of the stream")
+	flag.Int64Var(&proxyOpts.MaxLenApprox, "max_len_approx", 0, "Maximum length of the stream (approx), 0 for no limit")
+	flag.Parse()
+
+	// Install signal handler.
 	handleSigal()
 
+	// Init proxy.
 	proxy := proxyOpts.NewProxy()
 	if err := proxy.Init(); err != nil {
-		log.Fatal(err)
+		log.Fatalf("[FATAL] %s\n", err)
 	}
 
+	// Run proxy.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		proxy.Run()
 	}()
 
+	// Wait signal.
+	<-stopCtx.Done()
+
+	// Stop proxy.
+	proxy.Close()
+
+	// Wait all.
 	wg.Wait()
 	log.Printf("[INF] controller exit now, bye bye~\n")
 }
