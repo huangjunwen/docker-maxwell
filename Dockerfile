@@ -1,13 +1,15 @@
 # Compile controller
+
 FROM golang:1.13
 
 WORKDIR /go/src/github.com/huangjunwen/docker-maxwell/controller
 
-COPY controller/* .
+ADD controller .
 
 RUN CGO_ENABLED=0 go build -o controller
 
 # maxwell + redis + controller
+
 FROM ubuntu:disco
 
 ENV MAXWELL_VER 1.23.5
