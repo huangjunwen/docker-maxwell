@@ -92,21 +92,22 @@ func main() {
 		"--logfile", "redis.log",
 	)
 	if err := upstream.Start(); err != nil {
-		log.Panicf("[ERR] Start upstream returns error: %s\n", err)
+		log.Panicf("[ERR] Upstream.Start returns error: %s\n", err)
 	}
+	log.Printf("[INF] Upstream.Start ok, pid: %d\n", upstream.Process.Pid)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer stop() // trigger other to stop
 		if err := upstream.Wait(); err != nil {
-			log.Printf("[ERR] Upstream exit with error: %s\n", err)
+			log.Printf("[ERR] Upstream.Wait returns error: %s\n", err)
 		} else {
-			log.Printf("[INF] Upstream exit ok\n")
+			log.Printf("[INF] Upstream.Wait ok\n")
 		}
-		stop() // trigger stop
 	}()
 
-	defer upstream.Process.Signal(syscall.SIGINT)
+	defer upstream.Process.Signal(syscall.SIGTERM)
 
 	// Run proxy.
 	proxy := proxy.Options{
@@ -116,8 +117,9 @@ func main() {
 		MaxLenApprox: maxLenApprox,
 	}.NewProxy()
 	if err := proxy.Init(); err != nil {
-		log.Panicf("[ERR] Start proxy returns error: %s\n", err)
+		log.Panicf("[ERR] Proxy.Init returns error: %s\n", err)
 	}
+	log.Printf("[INF] Proxy.Init ok\n")
 
 	wg.Add(1)
 	go func() {
@@ -126,11 +128,10 @@ func main() {
 	}()
 
 	defer func() {
-		log.Printf("[INF] Proxy ready to exit\n")
 		if err := proxy.Close(); err != nil {
-			log.Printf("[ERR] Proxy exit with error: %s\n", err)
+			log.Printf("[ERR] Proxy.Close returns error: %s\n", err)
 		} else {
-			log.Printf("[INF] Proxy exit ok\n")
+			log.Printf("[INF] Proxy.Close ok\n")
 		}
 	}()
 
@@ -166,18 +167,19 @@ func main() {
 	maxwell.Stderr = maxwellLog
 
 	if err := maxwell.Start(); err != nil {
-		log.Panicf("[ERR] Start maxwell returns error: %s\n", err)
+		log.Panicf("[ERR] Maxwell.Start returns error: %s\n", err)
 	}
+	log.Printf("[INF] Maxwell.Start ok, pid: %d\n", maxwell.Process.Pid)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer stop() // trigger other to stop
 		if err := maxwell.Wait(); err != nil {
-			log.Printf("[ERR] Maxwell exit with error: %s\n", err)
+			log.Printf("[ERR] Maxwell.Wait returns error: %s\n", err)
 		} else {
-			log.Printf("[INF] Maxwell exit ok\n")
+			log.Printf("[INF] Maxwell.Wait ok\n")
 		}
-		stop() // trigger stop
 	}()
 
 	defer maxwell.Process.Signal(syscall.SIGINT)
