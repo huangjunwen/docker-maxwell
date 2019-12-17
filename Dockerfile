@@ -1,3 +1,13 @@
+# Compile controller
+FROM golang:1.13
+
+WORKDIR /go/src/github.com/huangjunwen/docker-maxwell/controller
+
+COPY controller/* .
+
+RUN CGO_ENABLED=0 go build -o controller
+
+# maxwell + redis + controller
 FROM ubuntu:disco
 
 ENV MAXWELL_VER 1.23.5
@@ -13,3 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       tar xfz maxwell-$MAXWELL_VER.tar.gz && \
       mv maxwell-$MAXWELL_VER /usr/local/maxwell && \
       rm /tmp/maxwell-$MAXWELL_VER.tar.gz
+
+COPY --from=0 /go/src/github.com/huangjunwen/docker-maxwell/controller/controller /usr/local/bin
+
+ENTRYPOINT ["controller"]

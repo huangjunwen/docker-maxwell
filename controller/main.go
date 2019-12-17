@@ -88,6 +88,7 @@ func main() {
 	upstream := exec.Command(
 		redisServerPath,
 		upstreamConfPath,
+		"--bind", "0.0.0.0",
 		"--port", upstreamPort,
 		"--logfile", "redis.log",
 	)
