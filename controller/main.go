@@ -36,19 +36,22 @@ func handleSigal() {
 }
 
 var (
-	proxyOpts       = proxy.Options{}
-	redisServerPath = ""
-	redisConfPath   = ""
+	redisServerPath  = ""
+	upstreamConfPath = ""
+	upstreamPort     = ""
+	proxyPort        = ""
+	keyName          = ""
+	maxLenApprox     = int64(0)
 )
 
 func main() {
 	// Parse flags.
-	flag.StringVar(&proxyOpts.ListenPort, "listen_port", "6378", "Redis proxy listen port")
-	flag.StringVar(&proxyOpts.UpstreamPort, "upstream_port", "6379", "Upstream redis listen port")
-	flag.StringVar(&proxyOpts.KeyName, "key_name", "maxwell", "Key of the stream")
-	flag.Int64Var(&proxyOpts.MaxLenApprox, "max_len_approx", 0, "Maximum length of the stream (approx), 0 for no limit")
 	flag.StringVar(&redisServerPath, "redis_server", "redis-server", "Path to redis server")
-	flag.StringVar(&redisConfPath, "redis_conf", "/etc/redis/redis.conf", "Path to redis conf")
+	flag.StringVar(&upstreamConfPath, "upstream_conf", "/etc/redis/redis.conf", "Path to upstream redis conf")
+	flag.StringVar(&upstreamPort, "upstream_port", "6379", "Upstream redis listen port")
+	flag.StringVar(&proxyPort, "listen_port", "6378", "Redis proxy listen port")
+	flag.StringVar(&keyName, "key_name", "maxwell", "Key of the stream")
+	flag.Int64Var(&maxLenApprox, "max_len_approx", 0, "Maximum length of the stream (approx), 0 for no limit")
 	flag.Parse()
 
 	// Install signal handler.
@@ -61,7 +64,7 @@ func main() {
 	}()
 
 	// Run upstream redis.
-	upstream := exec.Command(redisServerPath, redisConfPath, "--port", proxyOpts.UpstreamPort)
+	upstream := exec.Command(redisServerPath, upstreamConfPath, "--port", upstreamPort)
 	if err := upstream.Start(); err != nil {
 		log.Panicf("[ERR] Start upstream returns error: %s\n", err)
 	}
@@ -77,7 +80,12 @@ func main() {
 	}()
 
 	// Run proxy.
-	proxy := proxyOpts.NewProxy()
+	proxy := proxy.Options{
+		ListenPort:   proxyPort,
+		UpstreamPort: upstreamPort,
+		KeyName:      keyName,
+		MaxLenApprox: maxLenApprox,
+	}.NewProxy()
 	if err := proxy.Init(); err != nil {
 		log.Panicf("[ERR] Start proxy returns error: %s\n", err)
 	}
