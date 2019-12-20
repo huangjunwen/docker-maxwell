@@ -1,116 +1,118 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-redis/redis"
-	"github.com/pkg/errors"
 	"github.com/tidwall/redcon"
 )
 
+var (
+	ErrInvalidStreamId = errors.New("Invalid stream id")
+)
+
 type Proxy struct {
-	// options.
-	opts Options
-
-	// the proxy server.
-	server *redcon.Server
-
-	// the real redis server.
-	redisServer *redis.Client
-
-	// used to wait handler.
-	wg sync.WaitGroup
-
-	// 1 if closed.
-	closed int32
-
-	// used to log the first entry.
-	first bool
-
-	// proxy should skip to this id.
+	opts     Options
+	ctx      context.Context
+	cancel   func()
+	client   *redis.Client
+	server   *redcon.Server
+	wg       sync.WaitGroup
 	skipToId StreamId
-
-	// last id sent from maxwell.
-	lastId StreamId
-
-	// last decoded json message sent from maxwell.
-	lastMsg message
+	lastId   StreamId
+	lastMsg  message
+	first    bool
 }
 
 type message struct {
 	Position string `json:"position"`
 }
 
-// Init the proxy.
-func (proxy *Proxy) Init() error {
-	// Create client and wait.
-	proxy.redisServer = redis.NewClient(&redis.Options{
+// Run the proxy.
+func (proxy *Proxy) Run(ctx context.Context, cancel func()) error {
+	proxy.ctx = ctx
+	proxy.cancel = cancel
+	proxy.client = redis.NewClient(&redis.Options{
 		Addr: ":" + proxy.opts.RedisPort,
 	})
+	proxy.server = redcon.NewServer("127.0.0.1:"+proxy.opts.ListenPort, proxy.handler, proxy.acceptHandler, proxy.closedHandler)
 
+	// Ping and wait.
 	for {
-		_, err := proxy.redisServer.Ping().Result()
+		_, err := proxy.client.Ping().Result()
 		if err == nil {
 			break
 		}
-		log.Printf("[ERR] Ping redis returns error: %s, wait a while...\n", err)
-		time.Sleep(time.Second)
-	}
-	log.Printf("[INF] Ping redis ok.\n")
+		proxy.infof("Redis.Ping returns error: %s, wait a while", err.Error())
 
-	// Get the last entry in stream.
-	result, err := proxy.redisServer.XRevRangeN(proxy.opts.KeyName, "+", "-", 1).Result()
+		select {
+		case <-ctx.Done():
+			proxy.errorf("Context done during ping wait")
+			return ctx.Err()
+
+		case <-time.After(time.Second):
+		}
+	}
+	proxy.infof("Redis.Ping ok")
+
+	// Get last message's id as skipToId.
+	result, err := proxy.client.XRevRangeN(proxy.opts.KeyName, "+", "-", 1).Result()
 	if err != nil {
-		return errors.WithMessagef(err, "Get last entry in stream(%+q) error", proxy.opts.KeyName)
+		proxy.errorf("Got last entry in stream error: %s", err.Error())
+		return err
 	}
 
-	// Set skipToId.
 	if len(result) != 0 {
 		id := ParseStreamId(result[0].ID)
 		if !id.Valid() {
-			return fmt.Errorf("Last id(%+q) in stream(%+q) is not valid", result[0].ID, proxy.opts.KeyName)
+			proxy.errorf("Last id in stream is invalid: %s", result[0].ID)
+			return ErrInvalidStreamId
 		}
 		proxy.skipToId = id
-		log.Printf("[INF] Skip to id found %v.\n", proxy.skipToId)
-	} else {
-		log.Printf("[INF] No skip to id.\n")
+	}
+	proxy.infof("Redis skip id: %v", proxy.skipToId)
+
+	// Wait other go routines started by the proxy.
+	defer proxy.wg.Wait()
+
+	// Close the proxy when context done.
+	proxy.wg.Add(1)
+	go func() {
+		defer proxy.wg.Done()
+		<-ctx.Done()
+		proxy.server.Close()
+	}()
+
+	// ListenAndServe.
+	if err := proxy.server.ListenAndServe(); err != nil {
+		proxy.errorf("ListenAndServe returns error: %s", err.Error())
+		return err
 	}
 
-	// Create proxy server.
-	proxy.server = redcon.NewServer("127.0.0.1:"+proxy.opts.ListenPort, proxy.handler, proxy.acceptHandler, proxy.closedHandler)
 	return nil
-}
-
-// Run the proxy.
-func (proxy *Proxy) Run() error {
-	return proxy.server.ListenAndServe()
-}
-
-// Close and wait everything cleanup.
-func (proxy *Proxy) Close() error {
-	ret := proxy.server.Close()
-	atomic.StoreInt32(&proxy.closed, 1)
-	proxy.wg.Wait()
-	return ret
 }
 
 func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 	proxy.wg.Add(1)
 	defer proxy.wg.Done()
-	if atomic.LoadInt32(&proxy.closed) > 0 {
+
+	select {
+	case <-proxy.ctx.Done():
 		return
+	default:
 	}
 
 	// Expect xadd only.
 	cmdName := strings.ToLower(string(cmd.Args[0]))
 	if cmdName != "xadd" {
-		panic(fmt.Errorf("Got unexpected command %q", cmdName))
+		proxy.errorf("Proxy got unexpected command %q", cmdName)
+		return
 	}
 
 	// Extract args.
@@ -120,7 +122,8 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 	value := cmd.Args[4]         // json encoded
 	proxy.lastMsg = message{}
 	if err := json.Unmarshal(value, &proxy.lastMsg); err != nil {
-		panic(fmt.Errorf("Decode json error: %s", err.Error()))
+		proxy.errorf("Proxy decode json error: %s", err.Error())
+		return
 	}
 
 	// NOTE: Ignore it silently if the message has no position.
@@ -134,7 +137,8 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 	// Parse it.
 	pos := ParseMaxwellBinlogPos(proxy.lastMsg.Position)
 	if !pos.Valid() {
-		panic(fmt.Errorf("Invalid binlog position %+q", proxy.lastMsg.Position))
+		proxy.errorf("Proxy got invalid maxwell binlog position: %q", proxy.lastMsg.Position)
+		return
 	}
 
 	// Update lastId.
@@ -154,7 +158,7 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	// Now send to real redis server.
-	result, err := proxy.redisServer.XAdd(&redis.XAddArgs{
+	result, err := proxy.client.XAdd(&redis.XAddArgs{
 		Stream:       proxy.opts.KeyName,
 		MaxLenApprox: proxy.opts.MaxLenApprox,
 		ID:           proxy.lastId.String(),
@@ -163,21 +167,32 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 		},
 	}).Result()
 	if err != nil {
-		panic(fmt.Errorf("XAdd %v error: %s", proxy.lastId, err.Error()))
+		proxy.errorf("XAdd %v error: %s", proxy.lastId, err.Error())
+		return
 	}
 	conn.WriteString(result)
 
 	if !proxy.first {
-		log.Printf("[INF] First entry: %v %s\n", proxy.lastId, value)
+		proxy.infof("First entry: %v %s", proxy.lastId, value)
 		proxy.first = true
 	}
 }
 
 func (proxy *Proxy) acceptHandler(conn redcon.Conn) bool {
-	log.Printf("[INF] Accept conn[%s]\n", conn.RemoteAddr())
+	proxy.infof("Accept conn %s", conn.RemoteAddr())
 	return true
 }
 
 func (proxy *Proxy) closedHandler(conn redcon.Conn, err error) {
-	log.Printf("[INF] Conn closed[%s]: %v\n", conn.RemoteAddr(), err)
+	proxy.infof("Conn closed %s: %s", conn.RemoteAddr(), err.Error())
+}
+
+func (proxy *Proxy) infof(format string, v ...interface{}) {
+	log.Printf("[INF][PROXY] "+format+"\n", v...)
+}
+
+// Any error will cause termination.
+func (proxy *Proxy) errorf(format string, v ...interface{}) {
+	log.Printf("[ERR][PROXY] "+format+"\n", v...)
+	proxy.cancel()
 }

@@ -25,7 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       wget https://github.com/zendesk/maxwell/releases/download/v$MAXWELL_VER/maxwell-$MAXWELL_VER.tar.gz && \
       tar xfz maxwell-$MAXWELL_VER.tar.gz && \
       mv maxwell-$MAXWELL_VER /usr/local/maxwell && \
-      rm /tmp/maxwell-$MAXWELL_VER.tar.gz
+      rm /tmp/maxwell-$MAXWELL_VER.tar.gz && \
+      chmod 644 /etc/redis/redis.conf
 
 COPY --from=0 /go/src/github.com/huangjunwen/docker-maxwell/controller/controller /usr/local/bin
 

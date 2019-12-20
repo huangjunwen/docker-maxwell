@@ -14,14 +14,9 @@ import (
 )
 
 var (
-	wg                = &sync.WaitGroup{}
-	stopCtx, stopFunc = context.WithCancel(context.Background())
-	stopOnce          = &sync.Once{}
+	wg            = &sync.WaitGroup{}
+	stopCtx, stop = context.WithCancel(context.Background())
 )
-
-func stop() {
-	stopOnce.Do(stopFunc)
-}
 
 func handleSigal() {
 
@@ -29,19 +24,22 @@ func handleSigal() {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
-		log.Printf("[INF] Got signal %s\n", sig.String())
+		log.Printf("[INF][CONTROLLER] Got signal %s\n", sig.String())
 		signal.Stop(sigCh)
 		stop()
 	}()
+
 }
 
 var (
+	// Hard coded vars.
 	redisServerPath = "redis-server"
 	maxwellPath     = "maxwell"
-	redisConfPath   = "/etc/redis/redis.conf"
 	redisPort       = "6379"
 	proxyPort       = "6378"
-
+	// Flags.
+	redisConfPath   = ""
+	redisAppendOnly = false
 	keyName         = ""
 	maxLenApprox    = int64(0)
 	mysqlUser       = ""
@@ -54,13 +52,8 @@ var (
 
 func main() {
 	// Parse flags.
-
-	// flag.StringVar(&redisServerPath, "redis_server_path", "redis-server", "Path to redis server")
-	// flag.StringVar(&maxwellPath, "maxwell_path", "maxwell", "Path to maxwell")
-	// flag.StringVar(&redisConfPath, "redis_conf", "/etc/redis/redis.conf", "Path to redis conf")
-	// flag.StringVar(&redisPort, "redis_port", "6379", "Redis server listen port")
-	// flag.StringVar(&proxyPort, "listen_port", "6378", "Redis proxy listen port")
-
+	flag.StringVar(&redisConfPath, "redis_conf", "/etc/redis/redis.conf", "Path to redis conf")
+	flag.BoolVar(&redisAppendOnly, "redis_append_only", true, "Turn on aof")
 	flag.StringVar(&keyName, "key_name", "maxwell", "Key of the stream")
 	flag.Int64Var(&maxLenApprox, "max_len_approx", 0, "Maximum length of the stream (approx), 0 for no limit")
 	flag.StringVar(&mysqlUser, "mysql_user", "", "MySQL user")
@@ -78,119 +71,133 @@ func main() {
 		log.Fatal("Missing -mysql_password")
 	}
 
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Panicf("[INF][CONTROLLER] Can't get curr working directory\n")
+	}
+
 	// Install signal handler.
 	handleSigal()
 
 	// Wait all exit.
 	defer func() {
 		wg.Wait()
-		log.Printf("[INF] Controller exit now, bye bye~\n")
+		log.Printf("[INF][CONTROLLER] Exit now, bye bye~\n")
 	}()
 
 	// Run redis.
-	redisServer := exec.Command(
-		redisServerPath,
-		redisConfPath,
-		"--bind", "0.0.0.0",
-		"--port", redisPort,
-		"--logfile", "redis.log",
-	)
-	if err := redisServer.Start(); err != nil {
-		log.Panicf("[ERR] RedisServer.Start returns error: %s\n", err)
-	}
-	log.Printf("[INF] RedisServer.Start ok, pid: %d\n", redisServer.Process.Pid)
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer stop() // trigger other to stop
-		if err := redisServer.Wait(); err != nil {
-			log.Printf("[ERR] RedisServer.Wait returns error: %s\n", err)
-		} else {
-			log.Printf("[INF] RedisServer.Wait ok\n")
+	{
+		args := []string{}
+		if redisConfPath != "" {
+			args = append(args, redisConfPath)
 		}
-	}()
+		args = append(args,
+			"--bind", "0.0.0.0",
+			"--port", redisPort,
+			"--pidfile", "",
+			"--daemonize", "no",
+			"--dir", wd,
+			"--logfile", "redis.log",
+			"--dbfilename", "dump.rdb",
+			"--appendfilename", "appendonly.aof",
+		)
+		if redisAppendOnly {
+			args = append(args,
+				"--appendonly", "yes",
+			)
+		}
+		redisServer := exec.Command(redisServerPath, args...)
 
-	defer redisServer.Process.Signal(syscall.SIGTERM)
+		if err := redisServer.Start(); err != nil {
+			log.Panicf("[ERR][REDIS] Start returns error: %s\n", err)
+		}
+		log.Printf("[INF][REDIS] Start ok, pid: %d\n", redisServer.Process.Pid)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer stop() // trigger other to stop
+			if err := redisServer.Wait(); err != nil {
+				log.Printf("[ERR][REDIS] Exit returns error: %s\n", err)
+			} else {
+				log.Printf("[INF][REDIS] Exit ok\n")
+			}
+		}()
+
+		defer redisServer.Process.Signal(syscall.SIGTERM)
+	}
 
 	// Run proxy.
-	proxy := proxy.Options{
-		ListenPort:   proxyPort,
-		RedisPort:    redisPort,
-		KeyName:      keyName,
-		MaxLenApprox: maxLenApprox,
-	}.NewProxy()
-	if err := proxy.Init(); err != nil {
-		log.Panicf("[ERR] Proxy.Init returns error: %s\n", err)
+	{
+		proxy := proxy.Options{
+			ListenPort:   proxyPort,
+			RedisPort:    redisPort,
+			KeyName:      keyName,
+			MaxLenApprox: maxLenApprox,
+		}.NewProxy()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("[INF][PROXY] Ready to run\n")
+			proxy.Run(stopCtx, stop)
+			log.Printf("[INF][PROXY] Exit\n")
+		}()
+
 	}
-	log.Printf("[INF] Proxy.Init ok\n")
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		proxy.Run()
-	}()
-
-	defer func() {
-		if err := proxy.Close(); err != nil {
-			log.Printf("[ERR] Proxy.Close returns error: %s\n", err)
-		} else {
-			log.Printf("[INF] Proxy.Close ok\n")
-		}
-	}()
 
 	// Run maxwell.
-	maxwell := exec.Command(
-		maxwellPath,
-		"--env_config_prefix", "MAXWELL_",
-		"--user", mysqlUser,
-		"--password", mysqlPassword,
-		"--host", mysqlHost,
-		"--port", mysqlPort,
-		"--schema_database", maxwellSchemaDB,
-		"--client_id", maxwellClientId,
-		"--producer", "redis",
-		"--redis_type", "xadd",
-		"--redis_host", "localhost",
-		"--redis_database", "0",
-		"--redis_port", proxyPort,
-		"--redis_key", keyName,
-		"--output_binlog_position", "true",
-		"--output_commit_info", "true",
-		"--output_xoffset", "true",
-		"--output_primary_keys", "true",
-		"--output_primary_key_columns", "true",
-		"--output_ddl", "true",
-		"--bootstrap", "none", // disable bootstrap
-	)
-
 	{
+		maxwell := exec.Command(
+			maxwellPath,
+			"--env_config_prefix", "MAXWELL_",
+			"--user", mysqlUser,
+			"--password", mysqlPassword,
+			"--host", mysqlHost,
+			"--port", mysqlPort,
+			"--schema_database", maxwellSchemaDB,
+			"--client_id", maxwellClientId,
+			"--producer", "redis",
+			"--redis_type", "xadd",
+			"--redis_host", "localhost",
+			"--redis_database", "0",
+			"--redis_port", proxyPort,
+			"--redis_key", keyName,
+			"--output_binlog_position", "true",
+			"--output_commit_info", "true",
+			"--output_xoffset", "true",
+			"--output_primary_keys", "true",
+			"--output_primary_key_columns", "true",
+			"--output_ddl", "true",
+			"--bootstrap", "none", // disable bootstrap
+		)
+
 		maxwellLog, err := os.OpenFile("maxwell.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			log.Panicf("[ERR] Open maxwell.log returns error: %s\n", err)
+			log.Panicf("[ERR][MAXWELL] Open log returns error: %s\n", err)
 		}
 		defer maxwellLog.Close()
 		maxwell.Stdout = maxwellLog
 		maxwell.Stderr = maxwellLog
-	}
 
-	if err := maxwell.Start(); err != nil {
-		log.Panicf("[ERR] Maxwell.Start returns error: %s\n", err)
-	}
-	log.Printf("[INF] Maxwell.Start ok, pid: %d\n", maxwell.Process.Pid)
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer stop() // trigger other to stop
-		if err := maxwell.Wait(); err != nil {
-			log.Printf("[ERR] Maxwell.Wait returns error: %s\n", err)
-		} else {
-			log.Printf("[INF] Maxwell.Wait ok\n")
+		if err := maxwell.Start(); err != nil {
+			log.Panicf("[ERR][MAXWELL] Start returns error: %s\n", err)
 		}
-	}()
+		log.Printf("[INF][MAXWELL] Start ok, pid: %d\n", maxwell.Process.Pid)
 
-	defer maxwell.Process.Signal(syscall.SIGINT)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer stop() // trigger other to stop
+			if err := maxwell.Wait(); err != nil {
+				log.Printf("[ERR][MAXWELL] Exit returns error: %s\n", err)
+			} else {
+				log.Printf("[INF][MAXWELL] Exit ok\n")
+			}
+		}()
+
+		defer maxwell.Process.Signal(syscall.SIGTERM)
+	}
 
 	// Wait signal.
 	<-stopCtx.Done()
