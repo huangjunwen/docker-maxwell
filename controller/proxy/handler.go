@@ -22,7 +22,7 @@ type Proxy struct {
 	server *redcon.Server
 
 	// the real redis server.
-	upstream *redis.Client
+	redisServer *redis.Client
 
 	// used to wait handler.
 	wg sync.WaitGroup
@@ -49,13 +49,13 @@ type message struct {
 
 // Init the proxy.
 func (proxy *Proxy) Init() error {
-	// Create upstream client and wait.
-	proxy.upstream = redis.NewClient(&redis.Options{
-		Addr: ":" + proxy.opts.UpstreamPort,
+	// Create client and wait.
+	proxy.redisServer = redis.NewClient(&redis.Options{
+		Addr: ":" + proxy.opts.RedisPort,
 	})
 
 	for {
-		_, err := proxy.upstream.Ping().Result()
+		_, err := proxy.redisServer.Ping().Result()
 		if err == nil {
 			break
 		}
@@ -65,14 +65,13 @@ func (proxy *Proxy) Init() error {
 	log.Printf("[INF] Ping redis ok.\n")
 
 	// Get the last entry in stream.
-	result, err := proxy.upstream.XRevRangeN(proxy.opts.KeyName, "+", "-", 1).Result()
+	result, err := proxy.redisServer.XRevRangeN(proxy.opts.KeyName, "+", "-", 1).Result()
 	if err != nil {
 		return errors.WithMessagef(err, "Get last entry in stream(%+q) error", proxy.opts.KeyName)
 	}
 
 	// Set skipToId.
 	if len(result) != 0 {
-		// Should skip to the last id in redis.
 		id := ParseStreamId(result[0].ID)
 		if !id.Valid() {
 			return fmt.Errorf("Last id(%+q) in stream(%+q) is not valid", result[0].ID, proxy.opts.KeyName)
@@ -154,8 +153,8 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 		return
 	}
 
-	// Now send to upstream.
-	result, err := proxy.upstream.XAdd(&redis.XAddArgs{
+	// Now send to real redis server.
+	result, err := proxy.redisServer.XAdd(&redis.XAddArgs{
 		Stream:       proxy.opts.KeyName,
 		MaxLenApprox: proxy.opts.MaxLenApprox,
 		ID:           proxy.lastId.String(),

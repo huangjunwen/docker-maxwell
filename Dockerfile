@@ -6,6 +6,7 @@ WORKDIR /go/src/github.com/huangjunwen/docker-maxwell/controller
 
 ADD controller .
 
+# RUN GOPROXY=https://goproxy.cn CGO_ENABLED=0 go build -o controller
 RUN CGO_ENABLED=0 go build -o controller
 
 # maxwell + redis + controller
@@ -27,5 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       rm /tmp/maxwell-$MAXWELL_VER.tar.gz
 
 COPY --from=0 /go/src/github.com/huangjunwen/docker-maxwell/controller/controller /usr/local/bin
+
+WORKDIR /root/run
+
+EXPOSE 6379
 
 ENTRYPOINT ["controller"]
