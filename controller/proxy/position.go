@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 )
@@ -76,4 +77,9 @@ func (pos BinlogPos) After(another BinlogPos) bool {
 		return false
 	}
 	return u > another.Uint64()
+}
+
+// FormatToMaxwellBinlogPos formats to maxwell binlog position.
+func (pos BinlogPos) FormatToMaxwellBinlogPos(baseName string) string {
+	return fmt.Sprintf("%s.%06d:%d", baseName, pos.FileNum, pos.FilePos)
 }

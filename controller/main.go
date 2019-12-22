@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/huangjunwen/docker-maxwell/controller/proxy"
 )
@@ -81,6 +86,9 @@ func main() {
 
 	// Wait all exit.
 	defer func() {
+		if rcv := recover(); rcv != nil {
+			log.Printf("[INF][CONTROLLER] Recover panic: %v\n", rcv)
+		}
 		wg.Wait()
 		log.Printf("[INF][CONTROLLER] Exit now, bye bye~\n")
 	}()
@@ -128,28 +136,83 @@ func main() {
 	}
 
 	// Run proxy.
+	skipToId := proxy.StreamId{}
 	{
-		proxy := proxy.Options{
+		proxy, err := proxy.Options{
 			ListenPort:   proxyPort,
 			RedisPort:    redisPort,
 			KeyName:      keyName,
 			MaxLenApprox: maxLenApprox,
-		}.NewProxy()
+		}.NewProxy(stopCtx)
+		if err != nil {
+			log.Panicf("[ERR][PROXY] NewProxy failed: %s\n", err.Error())
+		}
+
+		skipToId = proxy.SkipToId()
+		log.Printf("[INF][PROXY] NewProxy ok, skipToId is %v\n", skipToId)
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer stop() // trigger other to stop
 			log.Printf("[INF][PROXY] Ready to run\n")
-			proxy.Run(stopCtx, stop)
+			proxy.Run()
 			log.Printf("[INF][PROXY] Exit\n")
 		}()
+	}
 
+	// Get some information from mysql.
+	binlogBaseName := ""
+	{
+		db, err := sql.Open(
+			"mysql",
+			(&mysql.Config{
+				User:   mysqlUser,
+				Passwd: mysqlPassword,
+				Net:    "tcp",
+				Addr:   fmt.Sprintf("%s:%s", mysqlHost, mysqlPort),
+			}).FormatDSN(),
+		)
+		if err != nil {
+			log.Panicf("[INF][MYSQL] Open error: %s\n", err.Error())
+		}
+		defer db.Close()
+
+		rows, err := db.Query("SHOW BINARY LOGS")
+		if err != nil {
+			log.Panicf("[INF][MYSQL] Show binary logs error: %s\n", err.Error())
+		}
+		defer rows.Close()
+
+		var fileName string
+		var fileLen int64
+		for rows.Next() {
+			err = rows.Scan(&fileName, &fileLen)
+			break
+		}
+
+		if err != nil {
+			log.Panicf("[INF][MYSQL] Show binary logs scan error: %s\n", err.Error())
+		}
+
+		if fileName == "" {
+			log.Panicf("[INF][MYSQL] Cant' get binary log names\n")
+		}
+
+		rows.Close()
+		db.Close()
+
+		parts := strings.Split(fileName, ".")
+		if len(parts) != 2 {
+			log.Panicf("[INF][MYSQL] Unexpected binlog file name %+q\n", fileName)
+		}
+
+		binlogBaseName = parts[0]
 	}
 
 	// Run maxwell.
 	{
-		maxwell := exec.Command(
-			maxwellPath,
+		args := []string{
 			"--env_config_prefix", "MAXWELL_",
 			"--user", mysqlUser,
 			"--password", mysqlPassword,
@@ -170,7 +233,13 @@ func main() {
 			"--output_primary_key_columns", "true",
 			"--output_ddl", "true",
 			"--bootstrap", "none", // disable bootstrap
-		)
+		}
+		if skipToId.Valid() {
+			initPos := skipToId.FormatToMaxwellBinlogPos(binlogBaseName)
+			args = append(args, "--init_position", initPos)
+			log.Printf("[INF][MAXWELL] Init position: %s\n", initPos)
+		}
+		maxwell := exec.Command(maxwellPath, args...)
 
 		maxwellLog, err := os.OpenFile("maxwell.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
