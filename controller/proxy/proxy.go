@@ -15,18 +15,19 @@ import (
 )
 
 type Proxy struct {
-	opts           Options
-	loggerFile     *os.File
-	logger         *log.Logger
-	ctx            context.Context
-	cancel         func()
-	client         *redis.Client
-	server         *redcon.Server
-	skipToId       StreamId
-	wg             sync.WaitGroup
-	lastId         StreamId
-	lastMsg        message
-	firstHasLogged bool
+	opts          Options
+	loggerFile    *os.File
+	logger        *log.Logger
+	ctx           context.Context
+	stop          func()
+	client        *redis.Client
+	server        *redcon.Server
+	skipToId      StreamId
+	wg            sync.WaitGroup
+	lastId        StreamId
+	lastMsg       message
+	firstOnce     sync.Once
+	firstXAddOnce sync.Once
 }
 
 type message struct {
@@ -64,9 +65,9 @@ func (opts Options) NewProxy(ctx context.Context) (proxy *Proxy, err error) {
 
 	proxy.logger = log.New(proxy.loggerFile, "", log.LstdFlags|log.Lmicroseconds|log.Lshortfile)
 
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, stop := context.WithCancel(ctx)
 	proxy.ctx = ctx
-	proxy.cancel = cancel
+	proxy.stop = stop
 
 	proxy.client = redis.NewClient(&redis.Options{
 		Addr: ":" + opts.RedisPort,
@@ -157,7 +158,7 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 	cmdName := strings.ToLower(string(cmd.Args[0]))
 	if cmdName != "xadd" {
 		proxy.logger.Printf("Got unexpected command %q\n", cmdName)
-		proxy.cancel()
+		proxy.stop()
 		return
 	}
 
@@ -166,10 +167,11 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 	// id := string(cmd.Args[2]) // '*'
 	field := string(cmd.Args[3]) // 'message'
 	value := cmd.Args[4]         // json encoded
+
 	proxy.lastMsg = message{}
 	if err := json.Unmarshal(value, &proxy.lastMsg); err != nil {
 		proxy.logger.Printf("Decode json error: %s\n", err.Error())
-		proxy.cancel()
+		proxy.stop()
 		return
 	}
 
@@ -185,7 +187,7 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 	pos := ParseMaxwellBinlogPos(proxy.lastMsg.Position)
 	if !pos.Valid() {
 		proxy.logger.Printf("Got invalid maxwell binlog position %q\n", proxy.lastMsg.Position)
-		proxy.cancel()
+		proxy.stop()
 		return
 	}
 
@@ -198,6 +200,10 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 			Counter:   1,
 		}
 	}
+
+	proxy.firstOnce.Do(func() {
+		proxy.logger.Printf("First entry %v: %s\n", proxy.lastId, value)
+	})
 
 	// If lastId is not after skipToId. Ignore it.
 	if !proxy.lastId.After(proxy.skipToId) {
@@ -216,15 +222,15 @@ func (proxy *Proxy) handler(conn redcon.Conn, cmd redcon.Command) {
 	}).Result()
 	if err != nil {
 		proxy.logger.Printf("XAdd %v error: %s\n", proxy.lastId, err.Error())
-		proxy.cancel()
+		proxy.stop()
 		return
 	}
 	conn.WriteString(result)
 
-	if !proxy.firstHasLogged {
-		proxy.logger.Printf("First entry %v: %s\n", proxy.lastId, value)
-		proxy.firstHasLogged = true
-	}
+	proxy.firstXAddOnce.Do(func() {
+		proxy.logger.Printf("First xadd entry %v: %s\n", proxy.lastId, value)
+	})
+
 }
 
 func (proxy *Proxy) acceptHandler(conn redcon.Conn) bool {
