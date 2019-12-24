@@ -198,7 +198,7 @@ func main() {
 			"--redis_type", "xadd",
 			"--redis_host", "localhost",
 			"--redis_database", "0",
-			"--redis_port", viper.GetString("redis_port"),
+			"--redis_port", viper.GetString("proxy_port"),
 			"--redis_key", viper.GetString("key_name"),
 			"--output_binlog_position", "true",
 			"--output_commit_info", "true",
