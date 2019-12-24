@@ -2,18 +2,13 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
-
-	"github.com/go-sql-driver/mysql"
 
 	"github.com/huangjunwen/docker-maxwell/controller/proxy"
 )
@@ -161,55 +156,6 @@ func main() {
 		}()
 	}
 
-	// Get some information from mysql.
-	binlogBaseName := ""
-	{
-		db, err := sql.Open(
-			"mysql",
-			(&mysql.Config{
-				User:   mysqlUser,
-				Passwd: mysqlPassword,
-				Net:    "tcp",
-				Addr:   fmt.Sprintf("%s:%s", mysqlHost, mysqlPort),
-			}).FormatDSN(),
-		)
-		if err != nil {
-			log.Panicf("[INF][MYSQL] Open error: %s\n", err.Error())
-		}
-		defer db.Close()
-
-		rows, err := db.Query("SHOW BINARY LOGS")
-		if err != nil {
-			log.Panicf("[INF][MYSQL] Show binary logs error: %s\n", err.Error())
-		}
-		defer rows.Close()
-
-		var fileName string
-		var fileLen int64
-		for rows.Next() {
-			err = rows.Scan(&fileName, &fileLen)
-			break
-		}
-
-		if err != nil {
-			log.Panicf("[INF][MYSQL] Show binary logs scan error: %s\n", err.Error())
-		}
-
-		if fileName == "" {
-			log.Panicf("[INF][MYSQL] Cant' get binary log names\n")
-		}
-
-		rows.Close()
-		db.Close()
-
-		parts := strings.Split(fileName, ".")
-		if len(parts) != 2 {
-			log.Panicf("[INF][MYSQL] Unexpected binlog file name %+q\n", fileName)
-		}
-
-		binlogBaseName = parts[0]
-	}
-
 	// Run maxwell.
 	{
 		args := []string{
@@ -233,11 +179,6 @@ func main() {
 			"--output_primary_key_columns", "true",
 			"--output_ddl", "true",
 			"--bootstrap", "none", // disable bootstrap
-		}
-		if skipToId.Valid() {
-			initPos := skipToId.FormatToMaxwellBinlogPos(binlogBaseName)
-			args = append(args, "--init_position", initPos)
-			log.Printf("[INF][MAXWELL] Init position: %s\n", initPos)
 		}
 		maxwell := exec.Command(maxwellPath, args...)
 

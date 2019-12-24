@@ -111,6 +111,7 @@ func (opts Options) NewProxy(ctx context.Context) (proxy *Proxy, err error) {
 			return nil, fmt.Errorf("Invalid stream id %s", result[0].ID)
 		}
 		proxy.skipToId = id
+		proxy.logger.Printf("SkipToId is: %v\n", proxy.skipToId)
 	}
 
 	return proxy, nil
