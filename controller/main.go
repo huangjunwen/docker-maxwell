@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"log"
 	"os"
 	"os/exec"
@@ -10,8 +9,19 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
+
 	"github.com/huangjunwen/docker-maxwell/controller/proxy"
 )
+
+func getWd() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("[FATAL][CONTROLLER] Can't get curr working directory\n")
+	}
+	return wd
+}
 
 var (
 	wg            = &sync.WaitGroup{}
@@ -31,58 +41,73 @@ func handleSigal() {
 
 }
 
-var (
-	// Hard coded vars.
-	redisServerPath = "redis-server"
-	maxwellPath     = "maxwell"
-	redisPort       = "6379"
-	proxyPort       = "6378"
-	// Flags.
-	redisConfPath   = ""
-	redisAppendOnly = false
-	keyName         = ""
-	maxLenApprox    = int64(0)
-	mysqlUser       = ""
-	mysqlPassword   = ""
-	mysqlHost       = ""
-	mysqlPort       = ""
-	maxwellSchemaDB = ""
-	maxwellClientId = ""
-)
+func loadConfig() {
+	// Set defaults.
+	viper.SetDefault("redis_conf", "/etc/redis/redis.conf")
+	viper.SetDefault("redis_append_only", true)
+	viper.SetDefault("key_name", "maxwell")
+	viper.SetDefault("mysql_host", "127.0.0.1")
+	viper.SetDefault("mysql_port", "3306")
+	viper.SetDefault("maxwell_schema_db", "maxwell")
+	viper.SetDefault("maxwell_client_id", "maxwell")
+
+	// Read config file.
+	viper.SetConfigName("controller")
+	viper.AddConfigPath("$HOME")
+	viper.AddConfigPath(".")
+	viper.ReadInConfig()
+
+	// Parse flags.
+	pflag.String("redis_conf", "/etc/redis/redis.conf", "Path to redis conf")
+	pflag.Bool("redis_append_only", true, "Turn on aof")
+	pflag.String("key_name", "maxwell", "Key of the stream")
+	pflag.Int64("max_len_approx", 0, "Maximum length of the stream (approx), 0 for no limit")
+	pflag.String("mysql_user", "", "MySQL user")
+	pflag.String("mysql_password", "", "MySQL password")
+	pflag.String("mysql_host", "127.0.0.1", "MySQL host")
+	pflag.String("mysql_port", "3306", "MySQL port")
+	pflag.String("maxwell_schema_db", "maxwell", "MySQL database to store maxwell schema info")
+	pflag.String("maxwell_client_id", "maxwell", "Maxwell client id")
+	pflag.Parse()
+	viper.BindPFlags(pflag.CommandLine)
+
+	// Explicitly set.
+	viper.Set("redis_server_executable", "redis-server")
+	viper.Set("maxwell_executable", "maxwell")
+	viper.Set("redis_port", "6379")
+	viper.Set("proxy_port", "6378")
+
+	// Some checks.
+	if viper.GetString("mysql_user") == "" {
+		log.Fatalf("[FATAL][CONTROLLER] Missing mysql_user\n")
+	}
+	if viper.GetString("mysql_password") == "" {
+		log.Fatalf("[FATAL][CONTROLLER] Missing mysql_password\n")
+	}
+
+	// Some logs.
+	log.Printf("[INF][CONTROLLER] Conf redis_conf: %v\n", viper.Get("redis_conf"))
+	log.Printf("[INF][CONTROLLER] Conf redis_append_only: %v\n", viper.Get("redis_append_only"))
+	log.Printf("[INF][CONTROLLER] Conf key_name: %v\n", viper.Get("key_name"))
+	log.Printf("[INF][CONTROLLER] Conf max_len_approx: %v\n", viper.Get("max_len_approx"))
+	log.Printf("[INF][CONTROLLER] Conf maxwell_schema_db: %v\n", viper.Get("maxwell_schema_db"))
+	log.Printf("[INF][CONTROLLER] Conf maxwell_client_id: %v\n", viper.Get("maxwell_client_id"))
+}
 
 func main() {
-	// Parse flags.
-	flag.StringVar(&redisConfPath, "redis_conf", "/etc/redis/redis.conf", "Path to redis conf")
-	flag.BoolVar(&redisAppendOnly, "redis_append_only", true, "Turn on aof")
-	flag.StringVar(&keyName, "key_name", "maxwell", "Key of the stream")
-	flag.Int64Var(&maxLenApprox, "max_len_approx", 0, "Maximum length of the stream (approx), 0 for no limit")
-	flag.StringVar(&mysqlUser, "mysql_user", "", "MySQL user")
-	flag.StringVar(&mysqlPassword, "mysql_password", "", "MySQL password")
-	flag.StringVar(&mysqlHost, "mysql_host", "127.0.0.1", "MySQL host")
-	flag.StringVar(&mysqlPort, "mysql_port", "3306", "MySQL port")
-	flag.StringVar(&maxwellSchemaDB, "maxwell_schema_db", "maxwell", "MySQL database to store maxwell schema info")
-	flag.StringVar(&maxwellClientId, "maxwell_client_id", "maxwell", "Maxwell client id")
-	flag.Parse()
-
-	if mysqlUser == "" {
-		log.Fatal("Missing -mysql_user")
-	}
-	if mysqlPassword == "" {
-		log.Fatal("Missing -mysql_password")
-	}
-
-	wd, err := os.Getwd()
-	if err != nil {
-		log.Panicf("[INF][CONTROLLER] Can't get curr working directory\n")
-	}
+	// Get working directory.
+	wd := getWd()
 
 	// Install signal handler.
 	handleSigal()
 
-	// Wait all exit.
+	// Get config.
+	loadConfig()
+
+	// Catch all and wait.
 	defer func() {
 		if rcv := recover(); rcv != nil {
-			log.Printf("[INF][CONTROLLER] Recover panic: %v\n", rcv)
+			log.Printf("[INF][CONTROLLER] Recover from panic: %v\n", rcv)
 		}
 		wg.Wait()
 		log.Printf("[INF][CONTROLLER] Exit now, bye bye~\n")
@@ -91,12 +116,12 @@ func main() {
 	// Run redis.
 	{
 		args := []string{}
-		if redisConfPath != "" {
-			args = append(args, redisConfPath)
+		if redisConf := viper.GetString("redis_conf"); redisConf != "" {
+			args = append(args, redisConf)
 		}
 		args = append(args,
 			"--bind", "0.0.0.0",
-			"--port", redisPort,
+			"--port", viper.GetString("redis_port"),
 			"--pidfile", "",
 			"--daemonize", "no",
 			"--dir", wd,
@@ -104,12 +129,15 @@ func main() {
 			"--dbfilename", "dump.rdb",
 			"--appendfilename", "appendonly.aof",
 		)
-		if redisAppendOnly {
+		if viper.GetBool("redis_append_only") {
 			args = append(args,
 				"--appendonly", "yes",
 			)
 		}
-		redisServer := exec.Command(redisServerPath, args...)
+
+		redisServer := exec.Command(viper.GetString("redis_server_executable"), args...)
+		redisServer.Stdout = os.Stdout
+		redisServer.Stderr = os.Stderr
 
 		if err := redisServer.Start(); err != nil {
 			log.Panicf("[ERR][REDIS] Start returns error: %s\n", err)
@@ -134,10 +162,10 @@ func main() {
 	skipToId := proxy.StreamId{}
 	{
 		proxy, err := proxy.Options{
-			ListenPort:   proxyPort,
-			RedisPort:    redisPort,
-			KeyName:      keyName,
-			MaxLenApprox: maxLenApprox,
+			ListenPort:   viper.GetString("proxy_port"),
+			RedisPort:    viper.GetString("redis_port"),
+			KeyName:      viper.GetString("key_name"),
+			MaxLenApprox: viper.GetInt64("max_len_approx"),
 		}.NewProxy(stopCtx)
 		if err != nil {
 			log.Panicf("[ERR][PROXY] NewProxy failed: %s\n", err.Error())
@@ -160,18 +188,18 @@ func main() {
 	{
 		args := []string{
 			"--env_config_prefix", "MAXWELL_",
-			"--user", mysqlUser,
-			"--password", mysqlPassword,
-			"--host", mysqlHost,
-			"--port", mysqlPort,
-			"--schema_database", maxwellSchemaDB,
-			"--client_id", maxwellClientId,
+			"--user", viper.GetString("mysql_user"),
+			"--password", viper.GetString("mysql_password"),
+			"--host", viper.GetString("mysql_host"),
+			"--port", viper.GetString("mysql_port"),
+			"--schema_database", viper.GetString("maxwell_schema_db"),
+			"--client_id", viper.GetString("maxwell_client_id"),
 			"--producer", "redis",
 			"--redis_type", "xadd",
 			"--redis_host", "localhost",
 			"--redis_database", "0",
-			"--redis_port", proxyPort,
-			"--redis_key", keyName,
+			"--redis_port", viper.GetString("redis_port"),
+			"--redis_key", viper.GetString("key_name"),
 			"--output_binlog_position", "true",
 			"--output_commit_info", "true",
 			"--output_xoffset", "true",
@@ -180,7 +208,7 @@ func main() {
 			"--output_ddl", "true",
 			"--bootstrap", "none", // disable bootstrap
 		}
-		maxwell := exec.Command(maxwellPath, args...)
+		maxwell := exec.Command(viper.GetString("maxwell_executable"), args...)
 
 		maxwellLog, err := os.OpenFile("maxwell.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
